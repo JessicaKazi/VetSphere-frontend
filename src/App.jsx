@@ -39,6 +39,15 @@ export default function App() {
   const [quizIndex, setQuizIndex] = useState(0);
   const [answers, setAnswers] = useState({});
   const [quizSubmitted, setQuizSubmitted] = useState(false);
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem('vetsphere-token') || '');
+  const [student, setStudent] = useState(null);
+  const [authMode, setAuthMode] = useState('register');
+  const [authName, setAuthName] = useState('');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authMessage, setAuthMessage] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
+  const [quizSaveMessage, setQuizSaveMessage] = useState('');
 
   useEffect(() => {
     let alive = true;
@@ -59,6 +68,28 @@ export default function App() {
     try { localStorage.setItem('vetsphere-completed', JSON.stringify(completed)); } catch { /* storage may be unavailable */ }
   }, [completed]);
 
+  useEffect(() => {
+    if (!authToken) { setStudent(null); return; }
+    fetch('/api/auth/me', { headers: { Authorization: `Bearer ${authToken}` } })
+      .then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error || 'Please sign in again.'); return data; })
+      .then(data => { setStudent(data.user); setCompleted(data.user.completedLessons || []); })
+      .catch(() => { localStorage.removeItem('vetsphere-token'); setAuthToken(''); setStudent(null); });
+  }, [authToken]);
+
+  const submitAuth = async event => {
+    event.preventDefault(); setAuthBusy(true); setAuthMessage('');
+    try {
+      const response = await fetch(`/api/auth/${authMode}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: authName, email: authEmail, password: authPassword }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not sign in.');
+      localStorage.setItem('vetsphere-token', data.token); setStudent(data.user); setAuthToken(data.token); setCompleted(data.user.completedLessons || []); setAuthPassword(''); setAuthMessage('Welcome to VetSphere! Your account is ready.');
+    } catch (error) { setAuthMessage(error.message); }
+    finally { setAuthBusy(false); }
+  };
+
+  const signOut = () => { localStorage.removeItem('vetsphere-token'); setAuthToken(''); setStudent(null); setAuthMessage('You have signed out.'); };
+
+
   const filteredLessons = useMemo(() => lessons.filter(lesson => {
     const matchesCategory = category === 'All topics' || lesson.category === category;
     const term = search.trim().toLowerCase();
@@ -68,7 +99,27 @@ export default function App() {
 
   const openLesson = lesson => { setSelectedLesson(lesson); setActivePage('lesson'); window.scrollTo({ top: 0, behavior: 'smooth' }); };
   const navigate = page => { setActivePage(page); setSelectedLesson(null); setMenuOpen(false); window.scrollTo({ top: 0, behavior: 'smooth' }); };
-  const markComplete = id => setCompleted(prev => prev.includes(id) ? prev : [...prev, id]);
+  const markComplete = async id => {
+    setCompleted(prev => prev.includes(id) ? prev : [...prev, id]);
+    if (authToken) {
+      try {
+        const response = await fetch(`/api/progress/lessons/${encodeURIComponent(id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` }, body: JSON.stringify({ completed: true }) });
+        const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not sync progress.');
+        setCompleted(data.completedLessons); setStudent(prev => prev ? { ...prev, completedLessons: data.completedLessons } : prev);
+      } catch (error) { setAuthMessage(error.message); }
+    }
+  };
+
+  const saveQuizAttempt = async () => {
+    if (!authToken) { setQuizSaveMessage('Sign in to save this quiz result to your student profile.'); return; }
+    try {
+      const payload = Object.fromEntries(Object.entries(answers).map(([index, answer]) => [quizQuestions[Number(index)]?.id, answer]).filter(([id]) => id));
+      const response = await fetch('/api/progress/quiz', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` }, body: JSON.stringify({ answers: payload }) });
+      const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not save quiz result.');
+      setQuizSaveMessage(`Saved to your profile: ${data.score}/${data.total}.`);
+      setStudent(prev => prev ? { ...prev, quizAttempts: data.quizAttempts } : prev);
+    } catch (error) { setQuizSaveMessage(error.message); }
+  };
   const score = quizQuestions.reduce((sum, question, index) => sum + (answers[index] === question.answerIndex ? 1 : 0), 0);
   const restartQuiz = () => { setAnswers({}); setQuizIndex(0); setQuizSubmitted(false); };
 
@@ -84,6 +135,7 @@ export default function App() {
         <button className={activePage === 'home' ? 'nav-link active' : 'nav-link'} onClick={() => navigate('home')}>Discover</button>
         <button className={activePage === 'courses' ? 'nav-link active' : 'nav-link'} onClick={() => navigate('courses')}>Learning library</button>
         <button className={activePage === 'quiz' ? 'nav-link active' : 'nav-link'} onClick={() => navigate('quiz')}>Knowledge check</button>
+        <button className={activePage === 'account' ? 'nav-link active' : 'nav-link'} onClick={() => { setAuthMessage(''); navigate('account'); }}>{student ? 'My learning' : 'Student account'}</button>
         <button className="nav-cta" onClick={() => navigate('courses')}>Start learning <ArrowRight size={16}/></button>
       </nav>
     </header>
@@ -126,7 +178,18 @@ export default function App() {
 
       {activePage === 'lesson' && selectedLesson && <LessonPage lesson={selectedLesson} isComplete={completed.includes(selectedLesson.id)} onBack={() => navigate('courses')} onComplete={() => markComplete(selectedLesson.id)} onQuiz={() => navigate('quiz')}/>}
 
-      {activePage === 'quiz' && <section className="quiz-page section-wrap"><button className="back-link" onClick={() => navigate('home')}><ArrowLeft size={16}/> Back to discover</button><div className="quiz-header"><div className="quiz-icon"><CircleHelp size={26}/></div><div><div className="eyebrow">KNOWLEDGE CHECK</div><h1>Think you know <span className="serif-accent">your stuff?</span></h1><p>Take your time. This is about learning, not getting everything right first try.</p></div></div>{!quizSubmitted ? <div className="quiz-card"><div className="quiz-progress-row"><span>QUESTION {quizIndex + 1} OF {quizQuestions.length}</span><span>{Math.round((quizIndex + 1) / quizQuestions.length * 100)}% complete</span></div><div className="quiz-progress"><span style={{ width: `${(quizIndex + 1) / quizQuestions.length * 100}%` }}/></div><h2>{quizQuestions[quizIndex]?.question}</h2><div className="answer-options">{quizQuestions[quizIndex]?.options.map((option, index) => <button key={option} className={`answer-option ${answers[quizIndex] === index ? 'selected' : ''}`} onClick={() => setAnswers(prev => ({ ...prev, [quizIndex]: index }))}><span className="answer-letter">{String.fromCharCode(65 + index)}</span><span>{option}</span>{answers[quizIndex] === index && <Check size={18}/>}</button>)}</div><div className="quiz-card-footer"><span>{Object.keys(answers).length} of {quizQuestions.length} answered</span><button className="primary-button" disabled={answers[quizIndex] === undefined} onClick={() => quizIndex < quizQuestions.length - 1 ? setQuizIndex(i => i + 1) : setQuizSubmitted(true)}>{quizIndex < quizQuestions.length - 1 ? 'Next question' : 'See results'} <ArrowRight size={16}/></button></div></div> : <div className="quiz-results"><div className="result-medal"><GraduationCap size={32}/></div><div className="eyebrow">QUIZ COMPLETE</div><h2>You scored {score} out of {quizQuestions.length}.</h2><p>{score === quizQuestions.length ? 'Excellent work! You have a strong start on these concepts.' : score >= Math.ceil(quizQuestions.length / 2) ? 'Good effort! Review the explanations below to strengthen your foundations.' : 'Every expert starts somewhere. Review the explanations, then give it another try.'}</p><div className="review-list">{quizQuestions.map((q, i) => <div className="review-item" key={q.id}><span className={answers[i] === q.answerIndex ? 'review-status correct' : 'review-status incorrect'}>{answers[i] === q.answerIndex ? <Check size={15}/> : <X size={15}/>}</span><div><strong>{q.question}</strong><p>Correct answer: {q.options[q.answerIndex]}</p><small>{q.explanation}</small></div></div>)}</div><div className="result-actions"><button className="primary-button" onClick={restartQuiz}>Try again <ArrowRight size={16}/></button><button className="text-button" onClick={() => navigate('courses')}>Explore lessons</button></div></div>}</section>}
+      {activePage === 'account' && <section className="library-page section-wrap">
+        <div className="page-intro"><div className="eyebrow">YOUR LEARNING PROFILE</div><h1>{student ? `Welcome, ${student.name}.` : <>Your learning, <span className="serif-accent">your journey.</span></>}</h1><p>Create a free account to save completed lessons and quiz results across sessions and devices.</p></div>
+        {student ? <div className="quiz-card"><h2>Student dashboard</h2><p><strong>{student.email}</strong></p><div className="stats-strip"><div><span className="stat-number">{completed.length}</span><span className="stat-label">Lessons completed</span></div><div><span className="stat-number">{student.quizAttempts?.length || 0}</span><span className="stat-label">Quiz attempts saved</span></div></div><h3>Completed lessons</h3>{completed.length ? <ul>{completed.map(id => <li key={id}>{lessons.find(l => l.id === id)?.title || id}</li>)}</ul> : <p>Complete a lesson and it will appear here.</p>}{student.quizAttempts?.length > 0 && <><h3>Recent quiz results</h3><ul>{student.quizAttempts.slice(-5).reverse().map((attempt, i) => <li key={`${attempt.completedAt || i}-${i}`}>{attempt.score}/{attempt.total} correct</li>)}</ul></>}<button className="text-button" onClick={signOut}>Sign out</button></div> : <form className="quiz-card" onSubmit={submitAuth} style={{maxWidth: 560, marginInline: 'auto'}}>
+          <div className="answer-options" role="group" aria-label="Account action"><button type="button" className={`answer-option ${authMode === 'register' ? 'selected' : ''}`} onClick={() => {setAuthMode('register'); setAuthMessage('');}}>Create account</button><button type="button" className={`answer-option ${authMode === 'login' ? 'selected' : ''}`} onClick={() => {setAuthMode('login'); setAuthMessage('');}}>Sign in</button></div>
+          {authMode === 'register' && <label className="auth-field">Your name<input autoComplete="name" required minLength={2} maxLength={70} value={authName} onChange={e => setAuthName(e.target.value)} /></label>}
+          <label className="auth-field">Email address<input type="email" autoComplete="email" required maxLength={254} value={authEmail} onChange={e => setAuthEmail(e.target.value)} /></label>
+          <label className="auth-field">Password<input type="password" autoComplete={authMode === 'register' ? 'new-password' : 'current-password'} required minLength={authMode === 'register' ? 10 : 1} maxLength={128} value={authPassword} onChange={e => setAuthPassword(e.target.value)} />{authMode === 'register' && <small>Use at least 10 characters.</small>}</label>
+          {authMessage && <p role="status" aria-live="polite">{authMessage}</p>}<button className="primary-button" type="submit" disabled={authBusy}>{authBusy ? 'Please wait…' : authMode === 'register' ? 'Create free account' : 'Sign in'} <ArrowRight size={16}/></button><p className="footer-disclaimer">Accounts require the site owner to configure MongoDB. Never reuse a password from another service.</p>
+        </form>}
+      </section>}
+
+      {activePage === 'quiz' && <section className="quiz-page section-wrap"><button className="back-link" onClick={() => navigate('home')}><ArrowLeft size={16}/> Back to discover</button><div className="quiz-header"><div className="quiz-icon"><CircleHelp size={26}/></div><div><div className="eyebrow">KNOWLEDGE CHECK</div><h1>Think you know <span className="serif-accent">your stuff?</span></h1><p>Take your time. This is about learning, not getting everything right first try.</p></div></div>{!quizSubmitted ? <div className="quiz-card"><div className="quiz-progress-row"><span>QUESTION {quizIndex + 1} OF {quizQuestions.length}</span><span>{Math.round((quizIndex + 1) / quizQuestions.length * 100)}% complete</span></div><div className="quiz-progress"><span style={{ width: `${(quizIndex + 1) / quizQuestions.length * 100}%` }}/></div><h2>{quizQuestions[quizIndex]?.question}</h2><div className="answer-options">{quizQuestions[quizIndex]?.options.map((option, index) => <button key={option} className={`answer-option ${answers[quizIndex] === index ? 'selected' : ''}`} onClick={() => setAnswers(prev => ({ ...prev, [quizIndex]: index }))}><span className="answer-letter">{String.fromCharCode(65 + index)}</span><span>{option}</span>{answers[quizIndex] === index && <Check size={18}/>}</button>)}</div><div className="quiz-card-footer"><span>{Object.keys(answers).length} of {quizQuestions.length} answered</span><button className="primary-button" disabled={answers[quizIndex] === undefined} onClick={() => quizIndex < quizQuestions.length - 1 ? setQuizIndex(i => i + 1) : setQuizSubmitted(true)}>{quizIndex < quizQuestions.length - 1 ? 'Next question' : 'See results'} <ArrowRight size={16}/></button></div></div> : <div className="quiz-results"><div className="result-medal"><GraduationCap size={32}/></div><div className="eyebrow">QUIZ COMPLETE</div><h2>You scored {score} out of {quizQuestions.length}.</h2><p>{score === quizQuestions.length ? 'Excellent work! You have a strong start on these concepts.' : score >= Math.ceil(quizQuestions.length / 2) ? 'Good effort! Review the explanations below to strengthen your foundations.' : 'Every expert starts somewhere. Review the explanations, then give it another try.'}</p>{quizSaveMessage && <p role="status" aria-live="polite">{quizSaveMessage}</p>}<button className="text-button" onClick={saveQuizAttempt}>Save result to my profile</button><div className="review-list">{quizQuestions.map((q, i) => <div className="review-item" key={q.id}><span className={answers[i] === q.answerIndex ? 'review-status correct' : 'review-status incorrect'}>{answers[i] === q.answerIndex ? <Check size={15}/> : <X size={15}/>}</span><div><strong>{q.question}</strong><p>Correct answer: {q.options[q.answerIndex]}</p><small>{q.explanation}</small></div></div>)}</div><div className="result-actions"><button className="primary-button" onClick={restartQuiz}>Try again <ArrowRight size={16}/></button><button className="text-button" onClick={() => navigate('courses')}>Explore lessons</button></div></div>}</section>}
     </main>
 
     <footer className="site-footer"><div className="footer-main section-wrap"><div className="footer-brand"><button className="brand-button" onClick={() => navigate('home')}><span className="brand-mark"><PawPrint size={22}/></span><span className="brand-word">Vet<span>Sphere</span><small>VETERINARY LEARNING</small></span></button><p>Building the foundations for a future in animal health, one discovery at a time.</p></div><div className="footer-links"><strong>Explore</strong><button onClick={() => navigate('courses')}>Learning library</button><button onClick={() => navigate('quiz')}>Knowledge check</button></div><div className="footer-links"><strong>Our promise</strong><span>Free foundational learning</span><span>Evidence-minded education</span><span>Animal welfare first</span></div></div><div className="footer-bottom section-wrap"><span>© {new Date().getFullYear()} VetSphere · Built for curious minds.</span><span className="footer-disclaimer"><ShieldCheck size={14}/> Educational resource, not a substitute for a veterinarian.</span><span className={`api-status ${apiStatus}`}><i/>{apiStatus === 'connected' ? 'Database connected' : apiStatus === 'demo' ? 'Demo data active' : apiStatus === 'offline' ? 'Offline demo' : 'Connecting'}</span></div></footer>
